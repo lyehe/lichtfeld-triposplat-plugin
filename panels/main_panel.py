@@ -332,9 +332,16 @@ class TripoSplatPanel(lf.ui.Panel):
         try:
             self._gizmo = lf.TransformGizmo()  # verify: stub ctor + attach/operation API
             self._gizmo.operation = self.gizmo_mode
-            self._gizmo.attach_to_node(self._node_name, visualizer_world=False)
+            # Attach in visualizer-world space (the frame the viewport renders and
+            # the user interacts with). visualizer_world defaults to True; passing
+            # False drives the LEGACY data-world transform, which differs from the
+            # visualizer frame by the 3DGS Y-down/Z-forward <-> viewer Y-up
+            # convention (a flip of 2 of 3 axes) -> gizmo drag/rotate look reversed
+            # in 2 dims. Keep the default.
+            self._gizmo.attach_to_node(self._node_name)
             self._gizmo.set_on_change(self._on_gizmo_change)
             self._gizmo.set_on_end(self._on_gizmo_end)
+            self._on_gizmo_change()  # sync T/R/S fields to the node's current transform
         except Exception as exc:  # noqa: BLE001
             lf.log.warn(f"[triposplat] gizmo attach failed: {exc}")
 
@@ -380,7 +387,10 @@ class TripoSplatPanel(lf.ui.Panel):
         m = lf.compose_transform((self.tx, self.ty, self.tz),
                                  (self.rx, self.ry, self.rz),
                                  (self.scl, self.scl, self.scl))
-        lf.set_node_transform(self._node_name, m)
+        # Write in the SAME visualizer-world frame the gizmo uses, so typing in
+        # the fields and dragging the gizmo agree (not the legacy data-world
+        # lf.set_node_transform).
+        lf.set_node_visualizer_world_transform(self._node_name, m)
         lf.ui.request_redraw()
 
     def _reset_placement_fields(self):
