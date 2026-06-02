@@ -8,8 +8,6 @@ pytest.importorskip("triposplat")
 
 @pytest.mark.gpu
 def test_end_to_end_decode_produces_finite_gaussian():
-    import sys
-    sys.path.insert(0, ".")
     from PIL import Image
 
     from core import downloads, pipeline_loader

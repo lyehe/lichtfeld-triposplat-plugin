@@ -42,6 +42,7 @@ ignore = ["E501"]
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "--import-mode=importlib"
+markers = ["gpu: requires a CUDA GPU and downloaded weights"]
 
 [tool.lichtfeld]
 hot_reload = false

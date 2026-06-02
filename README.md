@@ -37,24 +37,43 @@ scene — ready to view, place, train alongside, or export.
 
 ## Installation
 
-Install the plugin with a dev junction/symlink:
+### Via LichtFeld UI (recommended)
+
+1. Open LichtFeld Studio
+2. Go to the **Plugins** panel
+3. Paste the GitHub URL: `https://github.com/lyehe/lichtfeld-triposplat-plugin`
+4. Click **Install**
+5. Restart LichtFeld Studio
+
+### Via Python
+
+```python
+import lichtfeld as lf
+lf.plugins.install("lyehe/lichtfeld-triposplat-plugin")
+```
+
+### Manual (dev junction/symlink)
 
 ```powershell
 # Windows — no admin; uses a directory junction
+git clone https://github.com/lyehe/lichtfeld-triposplat-plugin
+cd lichtfeld-triposplat-plugin
 .\install.ps1
 ```
 
 ```bash
 # Linux / macOS
+git clone https://github.com/lyehe/lichtfeld-triposplat-plugin
+cd lichtfeld-triposplat-plugin
 ./install.sh
 ```
 
-Then launch LichtFeld Studio. On first load LFS runs `uv sync` in the plugin dir
-to build the venv (CUDA torch 2.11 cu130, torchvision, triton-windows on
-Windows, etc.); subsequent launches are near-instant. The ~3.8 GB TripoSplat
-weights (5 safetensors files from `VAST-AI/TripoSplat`) download lazily in the
-background on first load — the panel shows a progress banner until they're
-ready. When you see `triposplat_plugin loaded` in the log, the plugin is active.
+On first load, LFS runs `uv sync` in the plugin dir to build the venv (CUDA
+torch 2.11 cu130, torchvision, triton-windows on Windows, etc.); subsequent
+launches are near-instant. The ~3.8 GB TripoSplat weights (5 safetensors files
+from `VAST-AI/TripoSplat`) download lazily in the background on first load — the
+panel shows a progress banner until they're ready. When you see
+`triposplat_plugin loaded` in the log, the plugin is active.
 
 ## Usage
 
