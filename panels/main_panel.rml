@@ -80,9 +80,27 @@
   <!-- Model -->
   <span class="section-title text-accent">Model</span>
   <span class="help-text text-muted">{{model_status_line}}</span>
-  <div class="button-row">
-    <button class="btn btn--default" data-event-click="reload_weights">Re-download</button>
-    <button class="btn btn--default" data-event-click="unload_model" data-if="model_loaded">Unload</button>
+  <div class="button-row" data-if="show_load_btn">
+    <button class="btn btn--default btn--full" data-event-click="load_model">Load model</button>
+  </div>
+  <div class="button-row" data-if="model_loaded">
+    <button class="btn btn--default btn--full" data-event-click="unload_model">Free VRAM</button>
+  </div>
+  <div class="section-header" data-event-click="toggle_section('manage')">
+    <span class="section-arrow" id="arrow-manage">&#x25B6;</span>
+    <span class="text-muted">Manage</span>
+  </div>
+  <div class="section-content collapsed" id="sec-manage">
+    <div data-if="!confirm_redownload">
+      <button class="btn btn--default btn--full" data-event-click="ask_redownload">Re-download weights (3.8 GB)...</button>
+    </div>
+    <div data-if="confirm_redownload">
+      <span class="help-text text-muted">Delete ~3.8 GB and re-download all weights?</span>
+      <div class="button-row">
+        <button class="btn btn--warning" data-event-click="confirm_redownload_yes">Delete &amp; re-download</button>
+        <button class="btn btn--default" data-event-click="confirm_redownload_no">Cancel</button>
+      </div>
+    </div>
   </div>
 
   <!-- Placement -->

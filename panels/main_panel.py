@@ -11,7 +11,8 @@ from ..core.job import JobConfig, JobResult, TripoSplatJob, num_gaussians_valid
 PLUGIN_NAME = "triposplat_plugin"
 
 _DIRTY_DL = ("model_downloading", "model_error", "dl_progress_value", "dl_progress_pct",
-             "dl_bytes_line", "dl_error_text", "model_status_line", "model_loaded", "can_run")
+             "dl_bytes_line", "dl_error_text", "model_status_line", "model_loaded",
+             "show_load_btn", "confirm_redownload", "can_run")
 _DIRTY_PREVIEW = ("has_matte",)
 _DIRTY_RUN = ("stage_text", "progress_value", "progress_pct", "progress_status")
 _DIRTY_RUNNING = ("show_idle", "show_running", "can_run")
@@ -58,7 +59,8 @@ class TripoSplatPanel(lf.ui.Panel):
         self._cached_signature = None
         self._node_name = ""
         self._gizmo = None
-        self._collapsed = {"settings"}
+        self._confirm_redownload = False
+        self._collapsed = {"settings", "manage"}
         # diff caches
         self._last_dl = None
         self._last_stage = ""
@@ -120,6 +122,8 @@ class TripoSplatPanel(lf.ui.Panel):
         model.bind_func("dl_error_text", lambda: downloads.get_state()["error"])
         model.bind_func("model_status_line", self._model_status_line)
         model.bind_func("model_loaded", pipeline_loader.is_loaded)
+        model.bind_func("show_load_btn", self._show_load_btn)
+        model.bind_func("confirm_redownload", lambda: self._confirm_redownload)
         model.bind_func("has_matte", lambda: self._matte_rgb is not None)
         model.bind_func("has_latent", lambda: self._cached_latent is not None)
         model.bind_func("has_node", lambda: bool(self._node_name))
@@ -141,8 +145,11 @@ class TripoSplatPanel(lf.ui.Panel):
         model.bind_event("browse_image", self._on_browse_image)
         model.bind_event("toggle_section", self._on_toggle_section)
         model.bind_event("retry_download", lambda *_: downloads.start_background_download())
-        model.bind_event("reload_weights", self._on_reload_weights)
+        model.bind_event("load_model", self._on_load_model)
         model.bind_event("unload_model", lambda *_: threading.Thread(target=pipeline_loader.unload, daemon=True).start())
+        model.bind_event("ask_redownload", self._on_ask_redownload)
+        model.bind_event("confirm_redownload_yes", self._on_redownload_yes)
+        model.bind_event("confirm_redownload_no", self._on_redownload_no)
         model.bind_event("do_start", self._on_start)
         model.bind_event("do_cancel", self._on_cancel)
         model.bind_event("redecode", self._on_redecode)
@@ -217,10 +224,21 @@ class TripoSplatPanel(lf.ui.Panel):
         s = downloads.get_state()
         return f"{s['bytes_downloaded']//1_000_000} / {s['bytes_total']//1_000_000} MB"
 
+    def _show_load_btn(self):
+        return (downloads.is_ready() and not pipeline_loader.is_loaded()
+                and downloads.get_state()["stage"] != "downloading")
+
     def _model_status_line(self):
-        if downloads.is_ready():
-            return "Model ready (loaded)" if pipeline_loader.is_loaded() else "Weights ready (not loaded)"
-        return downloads.get_state().get("message", "")
+        st = downloads.get_state()
+        if st["stage"] == "downloading":
+            return st.get("message", "Downloading weights...")
+        if st["stage"] == "error":
+            return "Weight download failed - expand Manage to retry."
+        if not downloads.is_ready():
+            return "Weights not downloaded yet."
+        if pipeline_loader.is_loaded():
+            return "Ready - model in VRAM"
+        return "Ready - weights cached (3.8 GB), not loaded"
 
     # --- input ---
     def _set_image_path(self, v):
@@ -320,9 +338,34 @@ class TripoSplatPanel(lf.ui.Panel):
             except Exception as exc:  # noqa: BLE001
                 lf.log.error(f"[triposplat] save failed: {exc}")
 
-    def _on_reload_weights(self, *_):
+    def _on_load_model(self, *_):
+        if pipeline_loader.is_loaded() or not downloads.is_ready():
+            return
+
+        def _task():
+            try:
+                pipeline_loader.get_pipeline()
+            except Exception as exc:  # noqa: BLE001
+                lf.log.error(f"[triposplat] model load failed: {exc}")
+            finally:
+                self._dirty(*_DIRTY_DL)
+
+        threading.Thread(target=_task, daemon=True).start()
+        self._dirty(*_DIRTY_DL)
+
+    def _on_ask_redownload(self, *_):
+        self._confirm_redownload = True
+        self._dirty(*_DIRTY_DL)
+
+    def _on_redownload_no(self, *_):
+        self._confirm_redownload = False
+        self._dirty(*_DIRTY_DL)
+
+    def _on_redownload_yes(self, *_):
+        self._confirm_redownload = False
         downloads.delete_models()
         downloads.start_background_download()
+        self._dirty(*_DIRTY_DL)
 
     # --- placement / gizmo ---
     def _attach_gizmo(self):
@@ -426,7 +469,7 @@ class TripoSplatPanel(lf.ui.Panel):
     def _sync_section_states(self):
         if not self._doc:
             return
-        for name in ("settings",):
+        for name in ("settings", "manage"):
             content = self._doc.get_element_by_id(f"sec-{name}")
             arrow = self._doc.get_element_by_id(f"arrow-{name}")
             if content:
