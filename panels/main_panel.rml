@@ -1,0 +1,148 @@
+<rml>
+<head>
+  <link type="text/rcss" href="main_panel.rcss"/>
+</head>
+<body data-model="triposplat">
+<div id="content-wrap">
+<div id="content">
+
+  <span class="panel-title text-accent">TripoSplat</span>
+  <span class="panel-subtitle text-muted">Generate a 3D Gaussian splat from a single image.</span>
+
+  <!-- Weight download banner -->
+  <div class="model-banner" data-if="model_downloading">
+    <span class="status-line text-accent">Downloading TripoSplat weights...</span>
+    <div class="progress-wrap">
+      <progress class="job-progress" max="1" data-attr-value="dl_progress_value"></progress>
+      <span class="progress-text">{{dl_progress_pct}} - {{dl_bytes_line}}</span>
+    </div>
+  </div>
+  <div class="model-banner banner-warn" data-if="model_error">
+    <span class="status-error">Weight download failed</span>
+    <span class="error-detail text-default">{{dl_error_text}}</span>
+    <button class="btn btn--warning btn--full" data-event-click="retry_download">Retry</button>
+  </div>
+
+  <div class="separator"></div>
+
+  <!-- Input -->
+  <span class="section-title text-accent">Input image</span>
+  <div class="setting-row">
+    <span class="prop-label">Path</span>
+    <input type="text" data-value="image_path"/>
+  </div>
+  <div class="button-row">
+    <button class="btn btn--default btn--full" data-event-click="browse_image">Browse...</button>
+  </div>
+
+  <!-- Matte preview -->
+  <div data-if="has_matte">
+    <span class="section-title text-accent">Preprocessed matte</span>
+    <div class="preview-wrap"><div id="im-root"></div></div>
+    <div class="setting-row">
+      <span class="prop-label">Erode radius</span>
+      <input type="range" class="setting-slider" data-value="erode_radius" min="0" max="8" step="1"/>
+      <span class="slider-value">{{erode_radius}}</span>
+    </div>
+  </div>
+
+  <!-- Settings -->
+  <div class="section-header" data-event-click="toggle_section('settings')">
+    <span class="section-arrow" id="arrow-settings">&#x25B6;</span><span>Settings</span>
+  </div>
+  <div class="section-content collapsed" id="sec-settings">
+    <div class="setting-row"><span class="prop-label">Seed</span>
+      <input type="text" data-value="seed"/></div>
+    <div class="setting-row"><span class="prop-label">Steps</span>
+      <input type="range" class="setting-slider" data-value="steps" min="1" max="50" step="1"/>
+      <span class="slider-value">{{steps}}</span></div>
+    <div class="setting-row"><span class="prop-label">Guidance</span>
+      <input type="range" class="setting-slider" data-value="guidance_scale" min="1.0" max="10.0" step="0.5"/>
+      <span class="slider-value">{{guidance_scale}}</span></div>
+    <div class="setting-row"><span class="prop-label">Gaussians</span>
+      <select data-value="num_gaussians">
+        <option value="32768">32,768</option>
+        <option value="65536">65,536</option>
+        <option value="131072">131,072</option>
+        <option value="262144">262,144 (max)</option>
+      </select></div>
+    <div class="setting-row"><span class="prop-label">Shift (adv.)</span>
+      <input type="range" class="setting-slider" data-value="shift" min="1.0" max="6.0" step="0.5"/>
+      <span class="slider-value">{{shift}}</span></div>
+    <div class="setting-row">
+      <label class="setting-label"><input type="checkbox" data-checked="append_mode"/><span>Append (keep previous objects)</span></label>
+    </div>
+    <div class="button-row" data-if="has_latent">
+      <button class="btn btn--default btn--full" data-event-click="redecode">Re-decode at this count</button>
+    </div>
+  </div>
+
+  <!-- Model -->
+  <span class="section-title text-accent">Model</span>
+  <span class="help-text text-muted">{{model_status_line}}</span>
+  <div class="button-row">
+    <button class="btn btn--default" data-event-click="reload_weights">Re-download</button>
+    <button class="btn btn--default" data-event-click="unload_model" data-if="model_loaded">Unload</button>
+  </div>
+
+  <!-- Placement -->
+  <div data-if="has_node">
+    <span class="section-title text-accent">Placement</span>
+    <div class="setting-row"><span class="prop-label">Gizmo</span>
+      <select data-value="gizmo_mode">
+        <option value="translate">Move</option>
+        <option value="rotate">Rotate</option>
+        <option value="scale">Scale</option>
+      </select></div>
+    <div class="setting-row"><span class="prop-label">Pos X/Y/Z</span>
+      <input type="text" data-value="tx"/><input type="text" data-value="ty"/><input type="text" data-value="tz"/></div>
+    <div class="setting-row"><span class="prop-label">Rot X/Y/Z</span>
+      <input type="text" data-value="rx"/><input type="text" data-value="ry"/><input type="text" data-value="rz"/></div>
+    <div class="setting-row"><span class="prop-label">Scale</span>
+      <input type="text" data-value="scl"/></div>
+  </div>
+
+  <!-- Run / Cancel -->
+  <div data-if="show_idle">
+    <button class="btn btn--success btn--full action-btn" data-event-click="do_start" data-attrif-disabled="!can_run">Generate</button>
+  </div>
+  <div data-if="show_running">
+    <span class="status-line text-default">Stage: {{stage_text}}</span>
+    <div class="progress-wrap">
+      <progress class="job-progress" max="1" data-attr-value="progress_value"></progress>
+      <span class="progress-text">{{progress_pct}}</span>
+    </div>
+    <span class="help-text text-muted">{{progress_status}}</span>
+    <button class="btn btn--warning btn--full action-btn" data-event-click="do_cancel">Cancel</button>
+  </div>
+
+  <!-- Log -->
+  <div data-if="show_logs">
+    <div class="separator"></div>
+    <span class="section-title text-accent">Log</span>
+    <div class="log-box"><span class="log-output text-muted">{{live_log_text}}</span></div>
+  </div>
+
+  <!-- Result -->
+  <div data-if="show_results">
+    <div class="separator"></div>
+    <span class="section-title text-accent">Result</span>
+    <span class="result-line text-default">{{result_count}} gaussians in {{result_time}}</span>
+    <div class="setting-row"><span class="prop-label">Save format</span>
+      <select data-value="save_format"><option value="ply">.ply</option><option value="splat">.splat</option></select></div>
+    <div class="button-row">
+      <button class="btn btn--default btn--full" data-event-click="save_to_disk">Save to disk</button>
+    </div>
+  </div>
+
+  <!-- Error -->
+  <div data-if="show_error">
+    <div class="separator"></div>
+    <span class="status-error">Error</span>
+    <span class="error-detail text-default">{{error_text}}</span>
+  </div>
+
+</div>
+</div>
+</body>
+</rml>
