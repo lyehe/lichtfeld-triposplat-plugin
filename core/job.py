@@ -190,6 +190,27 @@ class TripoSplatJob:
                 progress = self._progress
                 self._result = JobResult(False, error=msg, elapsed_s=time.time() - t0)
             self._set(JobStage.ERROR, progress, msg)
+        finally:
+            # The pipeline stays resident across runs, so torch's CUDA caching
+            # allocator keeps each run's transient peak (encoder features, the
+            # per-step sampler activations, the octree-decoder workspace) and
+            # never returns it to the OS -> a second run sees much less free VRAM
+            # and can fragment/OOM. Trim it here. This frees only cached-but-unused
+            # blocks; the live latent + gaussian we hold are untouched.
+            self._trim_cuda_cache()
+
+    @staticmethod
+    def _trim_cuda_cache() -> None:
+        import gc
+
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001 - best-effort cleanup; never fail a job on this
+            pass
 
     # ---- the staged body ----
     def _run_pipeline(self, t0):
