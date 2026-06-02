@@ -37,3 +37,11 @@ def test_num_gaussians_validation_rounds_to_multiple_of_32():
     assert num_gaussians_valid(100000) == 100000 // 32 * 32 + (32 if (100000 % 32) >= 16 else 0)
     assert num_gaussians_valid(10) == 32768       # clamped up to min
     assert num_gaussians_valid(999999) == 262144  # clamped down to max
+
+
+def test_num_gaussians_validation_rounds_half_up_at_boundary():
+    # Exact half-point (n % 32 == 16) must round up, not round-half-to-even.
+    # n = 32768 + 16: documented contract rounds up to 32800.
+    assert num_gaussians_valid(32784) == 32800
+    # n = 65536 + 16 likewise rounds up.
+    assert num_gaussians_valid(65552) == 65568

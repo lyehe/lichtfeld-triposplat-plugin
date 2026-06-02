@@ -17,12 +17,17 @@ from . import insertion, pipeline_loader, preprocess
 _NUM_GAUSSIANS_MIN = 32768
 _NUM_GAUSSIANS_MAX = 262144
 _GAUSSIANS_PER_POINT = 32
+# Upper bound on how long the worker waits for the UI-thread scene insertion
+# (PLY write + lf.io.load + add_splat at up to 262k gaussians) to complete.
+_INSERT_TIMEOUT_S = 120.0
 
 
 def num_gaussians_valid(n: int) -> int:
     n = max(_NUM_GAUSSIANS_MIN, min(_NUM_GAUSSIANS_MAX, int(n)))
     if n % _GAUSSIANS_PER_POINT != 0:
-        n = round(n / _GAUSSIANS_PER_POINT) * _GAUSSIANS_PER_POINT
+        # Round half-up to the documented contract ((n % 32) >= 16 rounds up),
+        # not Python round()'s round-half-to-even.
+        n = ((n + _GAUSSIANS_PER_POINT // 2) // _GAUSSIANS_PER_POINT) * _GAUSSIANS_PER_POINT
     return max(_NUM_GAUSSIANS_MIN, min(_NUM_GAUSSIANS_MAX, n))
 
 
@@ -240,18 +245,31 @@ class TripoSplatJob:
         self._set(JobStage.INSERTING, 0.92, "Inserting into scene...")
         self._check_cancel()
         # Marshal the scene mutation to the UI thread (see __init__ helper).
-        node_holder = {}
+        # The marshalled callback has no return/raise channel back to this
+        # worker, so capture both the result and any failure in node_holder
+        # and re-surface them here after the wait.
+        node_holder: dict = {}
         done = threading.Event()
 
         def _ui_insert():
             try:
                 node_holder["name"] = insertion.insert_gaussian(
                     self._gaussian, append=cfg.append, log=self._log_line)
+            except Exception as exc:  # noqa: BLE001 - re-raised on the worker thread
+                node_holder["error"] = exc
             finally:
                 done.set()
 
         lf.ui.schedule_on_ui_thread(_ui_insert)  # verify: stub signature
-        done.wait(timeout=30.0)
+        # Budget: ~18 MB PLY write + lf.io.load + add_splat at 262k gaussians,
+        # plus time spent behind a busy UI thread, on slow disks.
+        if not done.wait(timeout=_INSERT_TIMEOUT_S):
+            raise RuntimeError(
+                f"Scene insertion did not complete within {_INSERT_TIMEOUT_S:.0f}s "
+                "(UI thread busy)."
+            )
+        if "error" in node_holder:
+            raise node_holder["error"]
 
         with self._lock:
             self._result = JobResult(
