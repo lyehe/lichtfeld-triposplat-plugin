@@ -5,11 +5,10 @@ from pathlib import Path
 
 import lichtfeld as lf
 
-from core import downloads, export, pipeline_loader, preprocess
-from core.job import JobConfig, JobResult, TripoSplatJob, num_gaussians_valid
+from ..core import downloads, export, pipeline_loader, preprocess
+from ..core.job import JobConfig, JobResult, TripoSplatJob, num_gaussians_valid
 
 PLUGIN_NAME = "triposplat_plugin"
-_IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 _DIRTY_DL = ("model_downloading", "model_error", "dl_progress_value", "dl_progress_pct",
              "dl_bytes_line", "dl_error_text", "model_status_line", "model_loaded", "can_run")
@@ -158,8 +157,10 @@ class TripoSplatPanel(lf.ui.Panel):
         avail_w, _ = ui.get_content_region_avail()
         disp_w = max(64.0, min(float(avail_w), 320.0))
         disp_h = disp_w * (h / max(1, w))
-        # verify: ui.image_tensor(label, array_or_tensor, (w,h)) — confirm signature in stubs.
-        ui.image_tensor("triposplat_matte", self._matte_rgb, (disp_w, disp_h))
+        # verify: ui.image_tensor(label, lichtfeld.Tensor, (w,h)) per stubs
+        # (ui/__init__.pyi:1650). Tensor.from_numpy is the documented numpy bridge
+        # (lichtfeld/__init__.pyi:538); numpy is not auto-accepted, so convert here.
+        ui.image_tensor("triposplat_matte", lf.Tensor.from_numpy(self._matte_rgb), (disp_w, disp_h))
 
     def on_update(self, doc):
         del doc
@@ -307,7 +308,11 @@ class TripoSplatPanel(lf.ui.Panel):
     def _on_save(self, *_):
         if not (self._job and self._job.gaussian):
             return
-        path = lf.ui.save_file_dialog("", f"triposplat.{self.save_format}")  # verify: stub
+        # verify: no generic save_file_dialog / .splat dialog in host stubs
+        # (ui/__init__.pyi only ships save_ply/sog/spz/las/...). Drive both ply
+        # and splat writers through save_ply_file_dialog (path/name picker only;
+        # the actual writer is chosen by self.save_format in export.save).
+        path = lf.ui.save_ply_file_dialog(default_name=f"triposplat.{self.save_format}")
         if path:
             try:
                 export.save(self._job.gaussian, path, self.save_format)
@@ -343,6 +348,9 @@ class TripoSplatPanel(lf.ui.Panel):
 
     def _on_gizmo_change(self, *_):
         try:
+            # verify: decompose_transform returns dict keys 'translation'/'euler'/'scale'
+            # (lichtfeld/__init__.pyi:400 docs "translation, rotation, scale"; compose_transform's
+            # euler_deg param implies 'euler'). Confirm key names against the running host.
             d = lf.decompose_transform(self._gizmo.matrix)
             self.tx, self.ty, self.tz = d["translation"]
             self.rx, self.ry, self.rz = d["euler"]
