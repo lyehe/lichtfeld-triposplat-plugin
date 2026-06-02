@@ -34,7 +34,11 @@ def insert_gaussian(gaussian, *, append: bool, log=None) -> str | None:
     import lichtfeld as lf
 
     _log = log or (lambda _m: None)
-    scene = lf.get_scene()
+    try:
+        scene = lf.get_scene()
+    except Exception as exc:  # noqa: BLE001 - mirror HYWorld2/VGGT: log + clean None
+        _log(f"insertion: lf.get_scene() failed: {exc}")
+        return None
     if scene is None or not scene.is_valid():
         _log("insertion: no valid scene; skipping.")
         return None
@@ -57,6 +61,9 @@ def insert_gaussian(gaussian, *, append: bool, log=None) -> str | None:
         # Lichtfeld-ml-sharp-Plugin (sharp_processor.py / panels). Match its usage.
         result = lf.io.load(str(ply_path))
         sd = result.splat_data
+        if sd is None:  # mirror ml-sharp: clean None instead of opaque AttributeError
+            _log("insertion: lf.io.load returned no splat_data; skipping.")
+            return None
         scene.add_splat(
             name=splat_name,
             means=sd.means_raw,
