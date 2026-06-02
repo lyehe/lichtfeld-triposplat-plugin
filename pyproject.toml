@@ -1,0 +1,51 @@
+[project]
+name = "TripoSplat"
+version = "0.1.0"
+description = "Generate a 3D Gaussian splat from a single image using VAST-AI TripoSplat, inserted directly into the scene."
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "Yehe Liu" }]
+
+dependencies = [
+    # `triposplat` is vendored inline at ./triposplat/ and put on sys.path by __init__.py.
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "numpy",
+    "safetensors",
+    "pillow",
+    "tqdm",
+    "huggingface-hub",
+    "triton-windows>=3.5 ; platform_system == 'Windows'",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.ruff]
+extend-exclude = ["triposplat", ".venv", "cache", "models"]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"
+
+[tool.lichtfeld]
+hot_reload = false
+plugin_api = ">=1,<2"
+lichtfeld_version = ">=0.5.0"
+required_features = []
+auto_start = false

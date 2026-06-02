@@ -1,0 +1,21 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Structure integrity
+        run: |
+          test -f triposplat/triposplat.py
+          test -f __init__.py
+          test -f pyproject.toml
+        shell: bash
+      - name: Ruff
+        run: uvx ruff check .
+      - name: Lock resolves
+        run: uv lock --no-cache

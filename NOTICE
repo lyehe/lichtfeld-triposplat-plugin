@@ -1,0 +1,14 @@
+TripoSplat — LichtFeld Studio plugin
+
+This plugin vendors the VAST-AI-Research/TripoSplat source (MIT License) under
+./triposplat/. Model weights (HuggingFace repo VAST-AI/TripoSplat, MIT License,
+~3.78 GB across 5 safetensors files) are downloaded at runtime into ./models/
+and are NOT redistributed with this plugin.
+
+Bundled/runtime dependencies and their licenses:
+  - torch, torchvision         (BSD-3-Clause)
+  - numpy                      (BSD-3-Clause)
+  - safetensors                (Apache-2.0)
+  - pillow                     (HPND)
+  - tqdm                       (MPL-2.0 / MIT)
+  - huggingface-hub            (Apache-2.0)

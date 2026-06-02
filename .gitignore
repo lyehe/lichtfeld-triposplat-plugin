@@ -1,0 +1,10 @@
+/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+/uv.lock
+# Root-anchored: only top-level downloaded weights + JIT caches are ignored.
+/models/
+/cache/
