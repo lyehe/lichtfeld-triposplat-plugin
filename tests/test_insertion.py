@@ -5,8 +5,9 @@ class _FakeScene:
     def __init__(self, existing):
         self._names = set(existing)
 
-    def has_node(self, name):
-        return name in self._names
+    def get_node(self, name):
+        # Mirror the real Scene.get_node(name) -> SceneNode | None contract.
+        return object() if name in self._names else None
 
 
 def test_next_group_name_replace_mode_returns_base():

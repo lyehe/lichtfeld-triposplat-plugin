@@ -22,9 +22,8 @@ def next_group_name(scene, append: bool) -> str:
     i = 1
     while True:
         candidate = f"{BASE_NAME}_{i:02d}"
-        # verify: Scene.has_node — confirm the host exposes a name lookup; if not,
-        # track inserted names in the panel and pass an `existing` set instead.
-        if not scene.has_node(candidate):
+        # Scene exposes get_node(name) -> SceneNode | None (there is no has_node).
+        if scene.get_node(candidate) is None:
             return candidate
         i += 1
 
