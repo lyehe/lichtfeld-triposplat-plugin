@@ -2,24 +2,42 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from urllib.parse import quote
+from uuid import uuid4
 
 import lichtfeld as lf
 
-from ..core import downloads, export, pipeline_loader, preprocess
+from ..core import downloads, pipeline_loader, preprocess
 from ..core.job import JobConfig, JobResult, TripoSplatJob, num_gaussians_valid
 
 PLUGIN_NAME = "triposplat_plugin"
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_PREVIEW_DIR = PLUGIN_ROOT / "cache" / "previews"
+_RML_PATH_SAFE_CHARS = "/:._-~"
 
 _DIRTY_DL = ("model_downloading", "model_error", "dl_progress_value", "dl_progress_pct",
              "dl_bytes_line", "dl_error_text", "model_status_line", "model_loaded",
-             "show_load_btn", "confirm_redownload", "can_run")
+             "confirm_redownload", "can_run")
 _DIRTY_PREVIEW = ("has_matte",)
 _DIRTY_RUN = ("stage_text", "progress_value", "progress_pct", "progress_status")
 _DIRTY_RUNNING = ("show_idle", "show_running", "can_run")
 _DIRTY_LOG = ("show_logs", "live_log_text")
 _DIRTY_RESULT = ("show_results", "show_error", "error_text", "result_count",
                  "result_time", "has_node", "has_latent")
-_DIRTY_PLACE = ("tx", "ty", "tz", "rx", "ry", "rz", "scl", "gizmo_mode")
+_DIRTY_PLACE = ("tx", "ty", "tz", "rx", "ry", "rz", "scl", "gizmo_mode", "gizmo_active", "edit_target")
+
+
+def _encode_rml_path(path: Path | str) -> str:
+    return quote(str(path), safe=_RML_PATH_SAFE_CHARS)
+
+
+def _safe_unlink(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 class TripoSplatPanel(lf.ui.Panel):
@@ -42,8 +60,7 @@ class TripoSplatPanel(lf.ui.Panel):
         self.shift = 3.0
         self.num_gaussians = 262144
         self.erode_radius = 1
-        self.append_mode = False
-        self.save_format = "ply"
+        self.append_mode = True
         # placement
         self.tx = self.ty = self.tz = 0.0
         self.rx = self.ry = self.rz = 0.0
@@ -53,14 +70,23 @@ class TripoSplatPanel(lf.ui.Panel):
         self._job: TripoSplatJob | None = None
         self._last_result: JobResult | None = None
         self._matte_pil = None
-        self._matte_rgb = None           # np.uint8 [H,W,3] for ui.image_tensor
+        self._matte_rgb = None           # np.uint8 [H,W,3] used by inference/cache tests
+        self._preview_token = uuid4().hex
+        self._preprocess_generation = 0
+        self._matte_preview_path: Path | None = None
+        self._matte_preview_decorator = "none"
+        self._matte_preview_size = (0, 0)
+        self._matte_preview_applied = ""
+        self._matte_preview_applied_size: tuple[int, int] | None = None
         self._preprocessed_id = ""
         self._cached_latent = None
         self._cached_signature = None
         self._node_name = ""
+        self._generated_nodes = []   # every splat this plugin has inserted, for selection-follow
+        self._last_selection = None  # last host selection seen (diff cache)
         self._gizmo = None
         self._confirm_redownload = False
-        self._collapsed = {"settings", "manage"}
+        self._collapsed = {"settings"}
         # diff caches
         self._last_dl = None
         self._last_stage = ""
@@ -80,11 +106,14 @@ class TripoSplatPanel(lf.ui.Panel):
     def on_mount(self, doc):
         self._doc = doc
         self._sync_section_states()
+        self._apply_matte_preview(doc)
 
     def on_unmount(self, doc):
         if self._job and self._job.is_running():
             self._job.cancel()
         self._detach_gizmo()
+        _safe_unlink(self._matte_preview_path)
+        self._matte_preview_path = None
         try:
             lf.ui.free_plugin_textures(PLUGIN_NAME)  # verify: stub
         except Exception:
@@ -108,7 +137,6 @@ class TripoSplatPanel(lf.ui.Panel):
                    lambda v: self._set_int("num_gaussians", v, 32768, 262144))
         model.bind("erode_radius", lambda: str(self.erode_radius), self._set_erode)
         model.bind("append_mode", lambda: self.append_mode, lambda v: self._set_bool("append_mode", v))
-        model.bind("save_format", lambda: self.save_format, lambda v: setattr(self, "save_format", str(v)))
         model.bind("gizmo_mode", lambda: self.gizmo_mode, self._set_gizmo_mode)
         for ax in ("tx", "ty", "tz", "rx", "ry", "rz", "scl"):
             model.bind(ax, (lambda a=ax: f"{getattr(self, a):.3f}"),
@@ -122,11 +150,12 @@ class TripoSplatPanel(lf.ui.Panel):
         model.bind_func("dl_error_text", lambda: downloads.get_state()["error"])
         model.bind_func("model_status_line", self._model_status_line)
         model.bind_func("model_loaded", pipeline_loader.is_loaded)
-        model.bind_func("show_load_btn", self._show_load_btn)
         model.bind_func("confirm_redownload", lambda: self._confirm_redownload)
         model.bind_func("has_matte", lambda: self._matte_rgb is not None)
         model.bind_func("has_latent", lambda: self._cached_latent is not None)
         model.bind_func("has_node", lambda: bool(self._node_name))
+        model.bind_func("edit_target", lambda: self._node_name or "(none)")
+        model.bind_func("gizmo_active", lambda: self._gizmo is not None)
         model.bind_func("can_run", self._can_run)
         model.bind_func("show_idle", lambda: not self._is_running())
         model.bind_func("show_running", self._is_running)
@@ -145,33 +174,75 @@ class TripoSplatPanel(lf.ui.Panel):
         model.bind_event("browse_image", self._on_browse_image)
         model.bind_event("toggle_section", self._on_toggle_section)
         model.bind_event("retry_download", lambda *_: downloads.start_background_download())
-        model.bind_event("load_model", self._on_load_model)
         model.bind_event("unload_model", lambda *_: threading.Thread(target=pipeline_loader.unload, daemon=True).start())
         model.bind_event("ask_redownload", self._on_ask_redownload)
         model.bind_event("confirm_redownload_yes", self._on_redownload_yes)
         model.bind_event("confirm_redownload_no", self._on_redownload_no)
+        model.bind_event("finalize_placement", self._on_finalize_placement)
+        model.bind_event("start_placement", self._on_start_placement)
         model.bind_event("do_start", self._on_start)
         model.bind_event("do_cancel", self._on_cancel)
         model.bind_event("redecode", self._on_redecode)
-        model.bind_event("save_to_disk", self._on_save)
         self._handle = model.get_handle()
 
     def draw(self, ui):
-        # Rendered into <div id="im-root">. Show the matte if present.
-        if self._matte_rgb is None:
+        # RML panels receive RmlUILayout here; image_tensor is only available on
+        # immediate-mode layouts. The matte is rendered through the RML element
+        # decorator in _apply_matte_preview().
+        del ui
+
+    def _save_matte_preview(self, matte_pil, generation: int) -> None:
+        old_path = self._matte_preview_path
+        path = _PREVIEW_DIR / f"matte_preview_{self._preview_token}_{generation}.png"
+        try:
+            _PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+            matte_pil.save(path)
+        except Exception as exc:  # noqa: BLE001
+            lf.log.warn(f"[triposplat] matte preview save failed: {exc}")
             return
-        h, w = self._matte_rgb.shape[0], self._matte_rgb.shape[1]
-        avail_w, _ = ui.get_content_region_avail()
-        disp_w = max(64.0, min(float(avail_w), 320.0))
-        disp_h = disp_w * (h / max(1, w))
-        # verify: ui.image_tensor(label, lichtfeld.Tensor, (w,h)) per stubs
-        # (ui/__init__.pyi:1650). Tensor.from_numpy is the documented numpy bridge
-        # (lichtfeld/__init__.pyi:538); numpy is not auto-accepted, so convert here.
-        ui.image_tensor("triposplat_matte", lf.Tensor.from_numpy(self._matte_rgb), (disp_w, disp_h))
+
+        self._matte_preview_path = path
+        self._matte_preview_decorator = f"image({_encode_rml_path(path)})"
+        self._matte_preview_size = tuple(int(v) for v in matte_pil.size)
+        self._matte_preview_applied = ""
+        self._matte_preview_applied_size = None
+        if old_path != path:
+            _safe_unlink(old_path)
+
+    def _apply_matte_preview(self, doc) -> bool:
+        if doc is None:
+            return False
+        root = doc.get_element_by_id("im-root")
+        if not root:
+            self._matte_preview_applied = ""
+            self._matte_preview_applied_size = None
+            return False
+
+        changed = False
+        decorator = self._matte_preview_decorator if self._matte_preview_path else "none"
+        if self._matte_preview_applied != decorator:
+            root.set_property("decorator", decorator)
+            self._matte_preview_applied = decorator
+            changed = True
+
+        w, h = self._matte_preview_size
+        if decorator == "none" or w <= 0 or h <= 0:
+            return changed
+
+        disp_w = int(round(max(64.0, min(float(w), 320.0))))
+        disp_h = int(round(max(1.0, disp_w * (h / max(1, w)))))
+        size = (disp_w, disp_h)
+        if self._matte_preview_applied_size != size:
+            root.set_property("width", f"{disp_w}dp")
+            root.set_property("height", f"{disp_h}dp")
+            self._matte_preview_applied_size = size
+            changed = True
+
+        return changed
 
     def on_update(self, doc):
-        del doc
         dirty = False
+        preview_dirty = self._apply_matte_preview(doc)
         dl = downloads.get_state()
         dl_key = (dl["stage"], round(dl["progress"], 3), pipeline_loader.is_loaded())
         if dl_key != self._last_dl:
@@ -200,7 +271,9 @@ class TripoSplatPanel(lf.ui.Panel):
                 self._on_job_finished(job)
                 self._dirty(*_DIRTY_RESULT, *_DIRTY_PREVIEW, *_DIRTY_PLACE)
                 dirty = True
-        return dirty
+        if self._sync_selection():
+            dirty = True
+        return dirty or preview_dirty
 
     @staticmethod
     def _result_key(r):
@@ -224,21 +297,17 @@ class TripoSplatPanel(lf.ui.Panel):
         s = downloads.get_state()
         return f"{s['bytes_downloaded']//1_000_000} / {s['bytes_total']//1_000_000} MB"
 
-    def _show_load_btn(self):
-        return (downloads.is_ready() and not pipeline_loader.is_loaded()
-                and downloads.get_state()["stage"] != "downloading")
-
     def _model_status_line(self):
         st = downloads.get_state()
         if st["stage"] == "downloading":
             return st.get("message", "Downloading weights...")
         if st["stage"] == "error":
-            return "Weight download failed - expand Manage to retry."
+            return "Weight download failed - re-download under Settings."
         if not downloads.is_ready():
-            return "Weights not downloaded yet."
+            return "Weights download on first use."
         if pipeline_loader.is_loaded():
             return "Ready - model in VRAM"
-        return "Ready - weights cached (3.8 GB), not loaded"
+        return "Ready - weights cached (3.8 GB)"
 
     # --- input ---
     def _set_image_path(self, v):
@@ -258,9 +327,15 @@ class TripoSplatPanel(lf.ui.Panel):
 
     def _kick_preprocess(self):
         """Run preprocess on a daemon thread; result feeds the matte preview."""
-        if not self.image_path or not downloads.is_ready():
+        if not self.image_path:
+            return
+        # Weights download on first use (image selection); idempotent.
+        downloads.start_background_download()
+        if not downloads.is_ready():
             return
         path, erode = self.image_path, self.erode_radius
+        self._preprocess_generation += 1
+        generation = self._preprocess_generation
 
         def _task():
             try:
@@ -268,8 +343,11 @@ class TripoSplatPanel(lf.ui.Panel):
                 pipe = pipeline_loader.get_pipeline()
                 src = Image.open(path).convert("RGB")
                 matte_pil, matte_rgb = preprocess.run_preprocess(pipe, src, erode)
+                if generation != self._preprocess_generation:
+                    return
                 self._matte_pil, self._matte_rgb = matte_pil, matte_rgb
                 self._preprocessed_id = f"{path}|{erode}"
+                self._save_matte_preview(matte_pil, generation)
                 # changing the matte invalidates any cached latent
                 self._cached_latent = None
                 self._cached_signature = None
@@ -319,39 +397,10 @@ class TripoSplatPanel(lf.ui.Panel):
             self._cached_latent = job.latent
             self._cached_signature = job.signature
             self._node_name = job.result.node_name
+            if self._node_name and self._node_name not in self._generated_nodes:
+                self._generated_nodes.append(self._node_name)
             self._reset_placement_fields()
             self._attach_gizmo()
-
-    # --- save ---
-    def _on_save(self, *_):
-        if not (self._job and self._job.gaussian):
-            return
-        # verify: no generic save_file_dialog / .splat dialog in host stubs
-        # (ui/__init__.pyi only ships save_ply/sog/spz/las/...). Drive both ply
-        # and splat writers through save_ply_file_dialog (path/name picker only;
-        # the actual writer is chosen by self.save_format in export.save).
-        path = lf.ui.save_ply_file_dialog(default_name=f"triposplat.{self.save_format}")
-        if path:
-            try:
-                export.save(self._job.gaussian, path, self.save_format)
-                lf.log.info(f"[triposplat] saved {path}")
-            except Exception as exc:  # noqa: BLE001
-                lf.log.error(f"[triposplat] save failed: {exc}")
-
-    def _on_load_model(self, *_):
-        if pipeline_loader.is_loaded() or not downloads.is_ready():
-            return
-
-        def _task():
-            try:
-                pipeline_loader.get_pipeline()
-            except Exception as exc:  # noqa: BLE001
-                lf.log.error(f"[triposplat] model load failed: {exc}")
-            finally:
-                self._dirty(*_DIRTY_DL)
-
-        threading.Thread(target=_task, daemon=True).start()
-        self._dirty(*_DIRTY_DL)
 
     def _on_ask_redownload(self, *_):
         self._confirm_redownload = True
@@ -396,6 +445,35 @@ class TripoSplatPanel(lf.ui.Panel):
                 pass
             self._gizmo = None
 
+    def _on_finalize_placement(self, *_):
+        # Disable the gizmo and lock in the current placement (T/R/S fields stay editable).
+        self._detach_gizmo()
+        self._dirty(*_DIRTY_PLACE)
+
+    def _on_start_placement(self, *_):
+        # Re-attach the interactive gizmo to keep adjusting placement.
+        self._attach_gizmo()
+        self._dirty(*_DIRTY_PLACE)
+
+    def _sync_selection(self):
+        """Follow the scene: when one of THIS plugin's generated splats is selected
+        in the viewport, retarget the placement gizmo + T/R/S fields to it. Polled
+        once per frame from on_update; gated on a selection change so it only acts on
+        transitions. Other scene nodes (e.g. a loaded training scene) are ignored."""
+        try:
+            sel = lf.get_selected_node_name() if lf.has_selection() else ""
+        except Exception:  # noqa: BLE001
+            return False
+        if sel == self._last_selection:
+            return False
+        self._last_selection = sel
+        if sel and sel != self._node_name and sel in self._generated_nodes:
+            self._node_name = sel
+            self._attach_gizmo()  # re-attaches + syncs T/R/S from the node's transform
+            self._dirty(*_DIRTY_PLACE, "has_node")
+            return True
+        return False
+
     def _on_gizmo_change(self, *_):
         try:
             # verify: decompose_transform returns dict keys 'translation'/'euler'/'scale'
@@ -403,8 +481,8 @@ class TripoSplatPanel(lf.ui.Panel):
             # euler_deg param implies 'euler'). Confirm key names against the running host.
             d = lf.decompose_transform(self._gizmo.matrix)
             self.tx, self.ty, self.tz = d["translation"]
-            self.rx, self.ry, self.rz = d["euler"]
-            self.scl = d["scale"][0]
+            self.rx, self.ry, self.rz = d["rotation_euler_deg"]
+            self.scl = abs(d["scale"][0])
             self._dirty(*_DIRTY_PLACE)
         except Exception:
             pass
@@ -422,18 +500,34 @@ class TripoSplatPanel(lf.ui.Panel):
 
     def _set_transform_field(self, axis, v):
         try:
-            setattr(self, axis, float(v))
+            val = float(v)
         except (TypeError, ValueError):
             return
+        setattr(self, axis, val)
         if not self._node_name:
             return
-        m = lf.compose_transform((self.tx, self.ty, self.tz),
-                                 (self.rx, self.ry, self.rz),
-                                 (self.scl, self.scl, self.scl))
-        # Write in the SAME visualizer-world frame the gizmo uses, so typing in
-        # the fields and dragging the gizmo agree (not the legacy data-world
-        # lf.set_node_transform).
-        lf.set_node_visualizer_world_transform(self._node_name, m)
+        # Decompose the node's CURRENT visualizer-world matrix and change ONLY the
+        # edited component, rather than recomposing the whole transform from the
+        # stored T/R/S. The visualizer-world frame can carry a per-axis reflection
+        # (the splat's data frame vs. the viewer's Y-up); collapsing that into a
+        # single uniform positive scale dropped the reflection and flipped the model
+        # upside down on scale edits. Decomposing fresh keeps the euler host-exact,
+        # and preserving each axis's sign keeps the reflection intact.
+        try:
+            d = lf.decompose_transform(lf.get_node_visualizer_world_transform(self._node_name))
+            t, e, s = list(d["translation"]), list(d["rotation_euler_deg"]), list(d["scale"])
+        except Exception:  # noqa: BLE001
+            return
+        slot = {"tx": (t, 0), "ty": (t, 1), "tz": (t, 2),
+                "rx": (e, 0), "ry": (e, 1), "rz": (e, 2)}
+        if axis == "scl":
+            s = [(-val if c < 0 else val) for c in s]  # keep reflection sign per axis
+        elif axis in slot:
+            arr, i = slot[axis]
+            arr[i] = val
+        # Write back in the SAME visualizer-world frame the gizmo uses, so typing in
+        # the fields and dragging the gizmo agree (not the legacy data-world path).
+        lf.set_node_visualizer_world_transform(self._node_name, lf.compose_transform(t, e, s))
         lf.ui.request_redraw()
 
     def _reset_placement_fields(self):
@@ -469,7 +563,7 @@ class TripoSplatPanel(lf.ui.Panel):
     def _sync_section_states(self):
         if not self._doc:
             return
-        for name in ("settings", "manage"):
+        for name in ("settings",):
             content = self._doc.get_element_by_id(f"sec-{name}")
             arrow = self._doc.get_element_by_id(f"arrow-{name}")
             if content:

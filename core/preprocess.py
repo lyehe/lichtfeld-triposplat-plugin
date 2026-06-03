@@ -1,8 +1,8 @@
 """Wrapper around TripoSplatPipeline.preprocess_image.
 
 Returns the upstream RGB matte (1024x1024, background removed, composited on
-black) as a PIL image plus a contiguous uint8 [H, W, 3] numpy array suitable
-for the panel's ui.image_tensor preview.
+black) as a PIL image plus a contiguous uint8 [H, W, 3] numpy array. The panel
+writes the PIL image to a cache PNG for its RML preview.
 """
 from __future__ import annotations
 

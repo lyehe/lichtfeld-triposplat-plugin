@@ -34,7 +34,31 @@ os.environ.setdefault("TRITON_CACHE_DIR", str(_TRITON_CACHE))
 if str(_PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_DIR))
 
-import lichtfeld as lf  # noqa: E402
+try:
+    import lichtfeld as lf  # noqa: E402
+except ModuleNotFoundError:  # pragma: no cover - test/DX path outside LFS host
+    from types import ModuleType, SimpleNamespace
+
+    class _Panel:
+        pass
+
+    lf = ModuleType("lichtfeld")
+    lf.ui = SimpleNamespace(
+        Panel=_Panel,
+        PanelSpace=SimpleNamespace(MAIN_PANEL_TAB="MAIN_PANEL_TAB"),
+        PanelHeightMode=SimpleNamespace(CONTENT="CONTENT"),
+        free_plugin_textures=lambda _plugin_name: None,
+        schedule_on_ui_thread=lambda fn: fn(),
+    )
+    lf.log = SimpleNamespace(
+        info=lambda _msg: None,
+        warn=lambda _msg: None,
+        error=lambda _msg: None,
+    )
+    lf.register_class = lambda _cls: None
+    lf.unregister_class = lambda _cls: None
+    lf.stop_training = lambda: None
+    sys.modules["lichtfeld"] = lf
 
 from .core import downloads, pipeline_loader  # noqa: E402
 from .panels.main_panel import TripoSplatPanel  # noqa: E402
@@ -70,7 +94,7 @@ def on_load():
     _apply_perf_flags()
     for cls in _classes:
         lf.register_class(cls)
-    downloads.start_background_download()
+    # Weights download lazily on first use (image selection), not at startup.
     try:
         global _last_training_state
         from lfs_plugins.ui.state import AppState

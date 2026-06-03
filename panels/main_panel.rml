@@ -38,7 +38,7 @@
   <!-- Matte preview -->
   <div data-if="has_matte">
     <span class="section-title text-accent">Preprocessed matte</span>
-    <div class="preview-wrap"><div id="im-root"></div></div>
+    <div class="preview-wrap"><div id="im-root" class="matte-preview"></div></div>
     <div class="setting-row">
       <span class="prop-label">Erode radius</span>
       <input type="range" class="setting-slider" data-value="erode_radius" min="0" max="8" step="1"/>
@@ -75,22 +75,7 @@
     <div class="button-row" data-if="has_latent">
       <button class="btn btn--default btn--full" data-event-click="redecode">Re-decode at this count</button>
     </div>
-  </div>
-
-  <!-- Model -->
-  <span class="section-title text-accent">Model</span>
-  <span class="help-text text-muted">{{model_status_line}}</span>
-  <div class="button-row" data-if="show_load_btn">
-    <button class="btn btn--default btn--full" data-event-click="load_model">Load model</button>
-  </div>
-  <div class="button-row" data-if="model_loaded">
-    <button class="btn btn--default btn--full" data-event-click="unload_model">Free VRAM</button>
-  </div>
-  <div class="section-header" data-event-click="toggle_section('manage')">
-    <span class="section-arrow" id="arrow-manage">&#x25B6;</span>
-    <span class="text-muted">Manage</span>
-  </div>
-  <div class="section-content collapsed" id="sec-manage">
+    <div class="separator"></div>
     <div data-if="!confirm_redownload">
       <button class="btn btn--default btn--full" data-event-click="ask_redownload">Re-download weights (3.8 GB)...</button>
     </div>
@@ -103,10 +88,15 @@
     </div>
   </div>
 
+  <!-- Model -->
+  <span class="section-title text-accent">Model</span>
+  <span class="help-text text-muted">{{model_status_line}}</span>
+
   <!-- Placement -->
   <div data-if="has_node">
     <span class="section-title text-accent">Placement</span>
-    <div class="setting-row"><span class="prop-label">Gizmo</span>
+    <span class="help-text text-muted">Editing: {{edit_target}} — select another generated splat in the scene to switch.</span>
+    <div class="setting-row" data-if="gizmo_active"><span class="prop-label">Gizmo</span>
       <select data-value="gizmo_mode">
         <option value="translate">Move</option>
         <option value="rotate">Rotate</option>
@@ -118,6 +108,10 @@
       <input type="text" data-value="rx"/><input type="text" data-value="ry"/><input type="text" data-value="rz"/></div>
     <div class="setting-row"><span class="prop-label">Scale</span>
       <input type="text" data-value="scl"/></div>
+    <div class="button-row">
+      <button class="btn btn--success btn--full" data-event-click="finalize_placement" data-if="gizmo_active">Finalize placement</button>
+      <button class="btn btn--default btn--full" data-event-click="start_placement" data-if="!gizmo_active">Adjust placement</button>
+    </div>
   </div>
 
   <!-- Run / Cancel -->
@@ -146,10 +140,8 @@
     <div class="separator"></div>
     <span class="section-title text-accent">Result</span>
     <span class="result-line text-default">{{result_count}} gaussians in {{result_time}}</span>
-    <div class="setting-row"><span class="prop-label">Save format</span>
-      <select data-value="save_format"><option value="ply">.ply</option><option value="splat">.splat</option></select></div>
-    <div class="button-row">
-      <button class="btn btn--default btn--full" data-event-click="save_to_disk">Save to disk</button>
+    <div class="button-row" data-if="model_loaded">
+      <button class="btn btn--default btn--full" data-event-click="unload_model">Free VRAM</button>
     </div>
   </div>
 

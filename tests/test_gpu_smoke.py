@@ -3,7 +3,7 @@ import pytest
 torch = pytest.importorskip("torch")
 if not torch.cuda.is_available():
     pytest.skip("no CUDA", allow_module_level=True)
-pytest.importorskip("triposplat")
+pytest.importorskip("triposplat", exc_type=ImportError)
 
 
 @pytest.mark.gpu
