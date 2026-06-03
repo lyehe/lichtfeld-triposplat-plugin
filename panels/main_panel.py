@@ -14,6 +14,7 @@ PLUGIN_NAME = "triposplat_plugin"
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 _PREVIEW_DIR = PLUGIN_ROOT / "cache" / "previews"
 _RML_PATH_SAFE_CHARS = "/:._-~"
+_MIN_SCALE = 0.001  # never let a splat collapse to 0/degenerate scale (unrecoverable basis)
 
 _DIRTY_DL = ("model_downloading", "model_error", "dl_progress_value", "dl_progress_pct",
              "dl_bytes_line", "dl_error_text", "model_status_line", "model_loaded",
@@ -86,7 +87,7 @@ class TripoSplatPanel(lf.ui.Panel):
         self._last_selection = None  # last host selection seen (diff cache)
         self._gizmo = None
         self._confirm_redownload = False
-        self._collapsed = {"settings"}
+        self._collapsed = {"advanced", "precise"}
         # diff caches
         self._last_dl = None
         self._last_stage = ""
@@ -122,12 +123,43 @@ class TripoSplatPanel(lf.ui.Panel):
         self._doc = None
         self._handle = None
 
+    def on_scene_changed(self, doc):
+        del doc
+        # A node was added/removed/edited. If the splat we're placing was deleted,
+        # drop the stale gizmo + "Editing" target so the panel never points at a dead
+        # node, and prune deleted nodes from the follow-selection list. Skipped while
+        # a job runs so we never race the just-inserted node before its on-UI-thread
+        # insert completes.
+        return self._prune_dead_nodes()
+
+    def _prune_dead_nodes(self):
+        if self._is_running():
+            return False
+        alive = []
+        for name in self._generated_nodes:
+            try:
+                exists = lf.get_node_visualizer_world_transform(name) is not None
+            except Exception:  # noqa: BLE001
+                exists = True  # uncertain -> keep it
+            if exists:
+                alive.append(name)
+        changed = len(alive) != len(self._generated_nodes)
+        self._generated_nodes = alive
+        if self._node_name and self._node_name not in alive:
+            self._detach_gizmo()
+            self._node_name = ""
+            self._last_selection = None
+            self._dirty(*_DIRTY_PLACE, "has_node")
+            changed = True
+        return changed
+
     def on_bind_model(self, ctx):
         model = ctx.create_data_model("triposplat")
         if model is None:
             return
         # two-way scalar bindings
         model.bind("image_path", lambda: self.image_path, self._set_image_path)
+        model.bind_func("image_name", lambda: Path(self.image_path).name if self.image_path else "No image selected")
         model.bind("seed", lambda: str(self.seed), lambda v: self._set_int("seed", v, 0, 2**31 - 1))
         model.bind("steps", lambda: str(self.steps), lambda v: self._set_int("steps", v, 1, 50))
         model.bind("guidance_scale", lambda: f"{self.guidance_scale:.1f}",
@@ -273,6 +305,17 @@ class TripoSplatPanel(lf.ui.Panel):
                 dirty = True
         if self._sync_selection():
             dirty = True
+        # LFS renders on demand, so when the app is otherwise idle on_update stops
+        # being called and the viewport stops repainting. While a splat is selected
+        # (so we may need to follow it) or the gizmo is active (placement in
+        # progress), keep requesting frames so selection-follow runs promptly and
+        # the viewport-overlay gizmo re-renders at the new node without needing a
+        # stray input event. The loop idles again once nothing is selected.
+        try:
+            if self._gizmo is not None or (self._generated_nodes and lf.has_selection()):
+                lf.ui.request_redraw()
+        except Exception:  # noqa: BLE001
+            pass
         return dirty or preview_dirty
 
     @staticmethod
@@ -318,7 +361,7 @@ class TripoSplatPanel(lf.ui.Panel):
         path = lf.ui.open_image_dialog("")  # verify: stub returns '' on cancel
         if path:
             self.image_path = path
-            self._dirty("image_path")
+            self._dirty("image_path", "image_name")
             self._kick_preprocess()
 
     def _set_erode(self, v):
@@ -363,12 +406,19 @@ class TripoSplatPanel(lf.ui.Panel):
                         guidance_scale=self.guidance_scale, shift=self.shift,
                         num_gaussians=num_gaussians_valid(self.num_gaussians),
                         erode_radius=self.erode_radius, append=self.append_mode)
+        # Only hand the cached matte/latent to the job if they match the CURRENT
+        # image+erode. Otherwise a new image was just picked and its (async)
+        # preprocess hasn't finished yet, so the cached matte is stale -> the job
+        # must re-run preprocess for cfg.image_path, or it would regenerate the
+        # OLD asset from the previous image's matte.
+        matte_current = self._preprocessed_id == f"{self.image_path}|{self.erode_radius}"
+        reuse = reuse_latent and matte_current
         job = TripoSplatJob(
             cfg,
-            cached_latent=self._cached_latent if reuse_latent else None,
-            cached_signature=self._cached_signature if reuse_latent else None,
-            matte_pil=self._matte_pil,
-            preprocessed_id=self._preprocessed_id,
+            cached_latent=self._cached_latent if reuse else None,
+            cached_signature=self._cached_signature if reuse else None,
+            matte_pil=self._matte_pil if matte_current else None,
+            preprocessed_id=self._preprocessed_id if matte_current else "",
         )
         self._last_result = None
         self._last_result_key = None
@@ -434,6 +484,7 @@ class TripoSplatPanel(lf.ui.Panel):
             self._gizmo.set_on_change(self._on_gizmo_change)
             self._gizmo.set_on_end(self._on_gizmo_end)
             self._on_gizmo_change()  # sync T/R/S fields to the node's current transform
+            lf.ui.request_redraw()   # repaint the viewport so the gizmo jumps to the new node now
         except Exception as exc:  # noqa: BLE001
             lf.log.warn(f"[triposplat] gizmo attach failed: {exc}")
 
@@ -476,19 +527,51 @@ class TripoSplatPanel(lf.ui.Panel):
 
     def _on_gizmo_change(self, *_):
         try:
-            # verify: decompose_transform returns dict keys 'translation'/'euler'/'scale'
-            # (lichtfeld/__init__.pyi:400 docs "translation, rotation, scale"; compose_transform's
-            # euler_deg param implies 'euler'). Confirm key names against the running host.
+            # decompose_transform returns keys translation / rotation_euler_deg / scale
+            # (host module.cpp); any reflection is folded into scale.x.
             d = lf.decompose_transform(self._gizmo.matrix)
             self.tx, self.ty, self.tz = d["translation"]
             self.rx, self.ry, self.rz = d["rotation_euler_deg"]
-            self.scl = abs(d["scale"][0])
+            scl = abs(d["scale"][0])
+            if scl < _MIN_SCALE:
+                # Gizmo dragged the scale below the safe minimum -> clamp the node's
+                # basis back up so it can't collapse to a degenerate, unrecoverable
+                # transform (matches the typed-field clamp in _set_transform_field).
+                self._clamp_node_scale_min()
+                scl = _MIN_SCALE
+            self.scl = scl
             self._dirty(*_DIRTY_PLACE)
         except Exception:
             pass
 
     def _on_gizmo_end(self, *_):
         self._on_gizmo_change()
+
+    def _clamp_node_scale_min(self):
+        """Rescale any basis column shorter than _MIN_SCALE back up to it, so a gizmo
+        scale-to-zero can't leave the node with a degenerate (unrecoverable) basis."""
+        try:
+            m = list(lf.get_node_visualizer_world_transform(self._node_name))
+        except Exception:  # noqa: BLE001
+            return
+        if not m or len(m) != 16:
+            return
+        changed = False
+        for c in range(3):  # columns 0,1,2 are the x/y/z basis vectors
+            ox, oy, oz = m[c * 4], m[c * 4 + 1], m[c * 4 + 2]
+            length = (ox * ox + oy * oy + oz * oz) ** 0.5
+            if length >= _MIN_SCALE:
+                continue
+            if length > 1e-12:
+                k = _MIN_SCALE / length
+                m[c * 4], m[c * 4 + 1], m[c * 4 + 2] = ox * k, oy * k, oz * k
+            else:
+                # fully collapsed column: rebuild it axis-aligned at the minimum length
+                m[c * 4], m[c * 4 + 1], m[c * 4 + 2] = 0.0, 0.0, 0.0
+                m[c * 4 + c] = _MIN_SCALE
+            changed = True
+        if changed:
+            lf.set_node_visualizer_world_transform(self._node_name, m)
 
     def _set_gizmo_mode(self, v):
         self.gizmo_mode = str(v)
@@ -503,31 +586,49 @@ class TripoSplatPanel(lf.ui.Panel):
             val = float(v)
         except (TypeError, ValueError):
             return
+        if axis == "scl":
+            # A 0 (or negative) scale collapses the basis columns to zero length, which
+            # is degenerate and unrecoverable (can't scale back up from length 0), and
+            # upsets the gizmo/renderer. Clamp to a tiny positive minimum.
+            val = max(abs(val), _MIN_SCALE)
         setattr(self, axis, val)
         if not self._node_name:
             return
-        # Decompose the node's CURRENT visualizer-world matrix and change ONLY the
-        # edited component, rather than recomposing the whole transform from the
-        # stored T/R/S. The visualizer-world frame can carry a per-axis reflection
-        # (the splat's data frame vs. the viewer's Y-up); collapsing that into a
-        # single uniform positive scale dropped the reflection and flipped the model
-        # upside down on scale edits. Decomposing fresh keeps the euler host-exact,
-        # and preserving each axis's sign keeps the reflection intact.
+        # Operate on the node's CURRENT visualizer-world matrix (column-major 16).
         try:
-            d = lf.decompose_transform(lf.get_node_visualizer_world_transform(self._node_name))
-            t, e, s = list(d["translation"]), list(d["rotation_euler_deg"]), list(d["scale"])
+            m = list(lf.get_node_visualizer_world_transform(self._node_name))
         except Exception:  # noqa: BLE001
             return
-        slot = {"tx": (t, 0), "ty": (t, 1), "tz": (t, 2),
-                "rx": (e, 0), "ry": (e, 1), "rz": (e, 2)}
+        if not m or len(m) != 16:
+            return
         if axis == "scl":
-            s = [(-val if c < 0 else val) for c in s]  # keep reflection sign per axis
-        elif axis in slot:
-            arr, i = slot[axis]
-            arr[i] = val
+            # Rescale each basis column to length |val|, keeping its DIRECTION (and
+            # any reflection the visualizer-world frame carries). This avoids the
+            # decompose -> euler -> recompose round-trip, where the host folds any
+            # reflection into scale.x and re-extracts euler -- that round-trip flips
+            # the model upside down on scale edits. Pure column math can't flip.
+            target = abs(val)
+            for c in range(3):  # columns 0,1,2 are the x/y/z basis vectors
+                ox, oy, oz = m[c * 4], m[c * 4 + 1], m[c * 4 + 2]
+                length = (ox * ox + oy * oy + oz * oz) ** 0.5
+                if length > 1e-8:
+                    k = target / length
+                    m[c * 4], m[c * 4 + 1], m[c * 4 + 2] = ox * k, oy * k, oz * k
+        elif axis in ("tx", "ty", "tz"):
+            m[12 + {"tx": 0, "ty": 1, "tz": 2}[axis]] = val  # translation column
+        elif axis in ("rx", "ry", "rz"):
+            # Absolute euler needs a recompose; decompose to keep translation+scale,
+            # set the one euler component, recompose.
+            try:
+                d = lf.decompose_transform(m)
+                t, e, s = list(d["translation"]), list(d["rotation_euler_deg"]), list(d["scale"])
+            except Exception:  # noqa: BLE001
+                return
+            e[{"rx": 0, "ry": 1, "rz": 2}[axis]] = val
+            m = lf.compose_transform(t, e, s)
         # Write back in the SAME visualizer-world frame the gizmo uses, so typing in
         # the fields and dragging the gizmo agree (not the legacy data-world path).
-        lf.set_node_visualizer_world_transform(self._node_name, lf.compose_transform(t, e, s))
+        lf.set_node_visualizer_world_transform(self._node_name, m)
         lf.ui.request_redraw()
 
     def _reset_placement_fields(self):
@@ -563,7 +664,7 @@ class TripoSplatPanel(lf.ui.Panel):
     def _sync_section_states(self):
         if not self._doc:
             return
-        for name in ("settings",):
+        for name in ("advanced", "precise"):
             content = self._doc.get_element_by_id(f"sec-{name}")
             arrow = self._doc.get_element_by_id(f"arrow-{name}")
             if content:
