@@ -113,6 +113,7 @@ class TripoSplatPanel(lf.ui.Panel):
         if self._job and self._job.is_running():
             self._job.cancel()
         self._detach_gizmo()
+        self._gizmo = None  # fully release the native gizmo on panel teardown
         _safe_unlink(self._matte_preview_path)
         self._matte_preview_path = None
         try:
@@ -187,7 +188,7 @@ class TripoSplatPanel(lf.ui.Panel):
         model.bind_func("has_latent", lambda: self._cached_latent is not None)
         model.bind_func("has_node", lambda: bool(self._node_name))
         model.bind_func("edit_target", lambda: self._node_name or "(none)")
-        model.bind_func("gizmo_active", lambda: self._gizmo is not None)
+        model.bind_func("gizmo_active", self._gizmo_active)
         model.bind_func("can_run", self._can_run)
         model.bind_func("show_idle", lambda: not self._is_running())
         model.bind_func("show_running", self._is_running)
@@ -312,7 +313,7 @@ class TripoSplatPanel(lf.ui.Panel):
         # the viewport-overlay gizmo re-renders at the new node without needing a
         # stray input event. The loop idles again once nothing is selected.
         try:
-            if self._gizmo is not None or (self._generated_nodes and lf.has_selection()):
+            if self._gizmo_active() or (self._generated_nodes and lf.has_selection()):
                 lf.ui.request_redraw()
         except Exception:  # noqa: BLE001
             pass
@@ -467,34 +468,48 @@ class TripoSplatPanel(lf.ui.Panel):
         self._dirty(*_DIRTY_DL)
 
     # --- placement / gizmo ---
+    def _ensure_gizmo(self):
+        """Create the ONE reusable viewport gizmo and wire its callbacks once. The
+        native TransformGizmo is meant to be reused (re-attached), NOT recreated per
+        selection -- constructing a fresh one each switch leaks native gizmos that keep
+        capturing mouse input, so the gizmo fails to switch to the new asset and the
+        camera pan/rotate freezes. Reuse one object and just re-target it."""
+        if self._gizmo is None:
+            self._gizmo = lf.TransformGizmo()
+            self._gizmo.set_on_change(self._on_gizmo_change)
+            self._gizmo.set_on_end(self._on_gizmo_end)
+        return self._gizmo
+
     def _attach_gizmo(self):
         if not self._node_name:
             return
-        self._detach_gizmo()
         try:
-            self._gizmo = lf.TransformGizmo()  # verify: stub ctor + attach/operation API
-            self._gizmo.operation = self.gizmo_mode
-            # Attach in visualizer-world space (the frame the viewport renders and
-            # the user interacts with). visualizer_world defaults to True; passing
-            # False drives the LEGACY data-world transform, which differs from the
-            # visualizer frame by the 3DGS Y-down/Z-forward <-> viewer Y-up
-            # convention (a flip of 2 of 3 axes) -> gizmo drag/rotate look reversed
-            # in 2 dims. Keep the default.
-            self._gizmo.attach_to_node(self._node_name)
-            self._gizmo.set_on_change(self._on_gizmo_change)
-            self._gizmo.set_on_end(self._on_gizmo_end)
+            g = self._ensure_gizmo()
+            g.operation = self.gizmo_mode
+            # Re-target the SAME gizmo to the node in visualizer-world space (the frame
+            # the viewport renders / the user interacts with; visualizer_world defaults
+            # to True -- False drives the LEGACY data-world transform, off by the 3DGS
+            # Y-down/Z-forward <-> viewer Y-up convention, which looks reversed).
+            g.attach_to_node(self._node_name)
             self._on_gizmo_change()  # sync T/R/S fields to the node's current transform
-            lf.ui.request_redraw()   # repaint the viewport so the gizmo jumps to the new node now
+            lf.ui.request_redraw()   # repaint so the gizmo shows on the new node now
         except Exception as exc:  # noqa: BLE001
             lf.log.warn(f"[triposplat] gizmo attach failed: {exc}")
 
     def _detach_gizmo(self):
+        # Detach (stop drawing + input capture) but KEEP the object for reuse.
         if self._gizmo is not None:
             try:
                 self._gizmo.detach()
             except Exception:
                 pass
-            self._gizmo = None
+            lf.ui.request_redraw()
+
+    def _gizmo_active(self):
+        try:
+            return self._gizmo is not None and self._gizmo.attached
+        except Exception:  # noqa: BLE001
+            return False
 
     def _on_finalize_placement(self, *_):
         # Disable the gizmo and lock in the current placement (T/R/S fields stay editable).
