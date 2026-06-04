@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Generate a 3D Gaussian splat from a single image using VAST-AI TripoSplat, inserted directly into the scene."
 requires-python = ">=3.12,<3.13"
 authors = [{ name = "Yehe Liu" }]
+readme = "README.md"
+keywords = ["gaussian-splatting", "image-to-3d", "triposplat", "single-image", "lichtfeld-plugin"]
 
 dependencies = [
     # `triposplat` is vendored inline at ./triposplat/ and put on sys.path by __init__.py.
@@ -16,6 +18,11 @@ dependencies = [
     "huggingface-hub",
     "triton-windows>=3.5 ; platform_system == 'Windows'",
 ]
+
+[project.urls]
+Repository = "https://github.com/lyehe/lichtfeld-triposplat-plugin"
+Homepage = "https://github.com/lyehe/lichtfeld-triposplat-plugin"
+Issues = "https://github.com/lyehe/lichtfeld-triposplat-plugin/issues"
 
 [dependency-groups]
 dev = ["pytest>=8"]
