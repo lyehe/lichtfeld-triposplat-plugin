@@ -10,8 +10,7 @@ scene — ready to view, place, train alongside, or export.
 - **Single-image generation** — pick one RGB photo; the model produces a full
   3D Gaussian splat. No camera poses, no COLMAP, no multi-view capture.
 - **Live matte preview** — the background-removal matte (RGB on black) renders
-  in the panel before you generate, and re-renders instantly when you change the
-  erode radius, so you can confirm the cutout is clean first.
+  in the panel before you generate, so you can confirm the cutout is clean first.
 - **Inserted directly into the scene** — the splat lands at the origin of your
   current scene via `lf.io.load`, so it sits alongside whatever is already
   loaded. Generating again **replaces** the previous result by default, or
@@ -81,8 +80,7 @@ panel shows a progress banner until they're ready. When you see
 2. Click **Browse** and select a single RGB image (a product photo on a clean
    background works best).
 3. The **matte preview** (the background-removed cutout, RGB on black) renders
-   in the panel. Adjust **Erode radius** if the cutout edge needs tightening —
-   the matte re-renders live.
+   in the panel, so you can confirm the cutout is clean before generating.
 4. Expand **Settings** to tune seed / steps / guidance / shift / Gaussian count
    if you want (defaults are fine for a first run).
 5. Click **Generate**. Progress runs through staged steps
@@ -109,7 +107,6 @@ Expand **Settings** in the panel. Defaults in parentheses.
 | **Guidance scale** | 1.0 – 10.0 | 3.0 | Classifier-free guidance strength. |
 | **Shift** | 1.0 – 6.0 | 3.0 | Flow-matching timestep shift. |
 | **Gaussians** | 32,768 – 262,144 | 262,144 | Output Gaussian count; rounded to a multiple of 32. Drives **Re-decode**. |
-| **Erode radius** | 0 – 8 | 1 | Pixels eroded from the background-removal matte; re-renders the preview live. |
 
 Other controls:
 
@@ -118,7 +115,7 @@ Other controls:
   `TripoSplat_02`, … so multiple objects coexist in the scene.
 - **Re-decode at this count** — re-decodes the cached latent at the current
   Gaussian count without re-running the sampler. Only changing the seed / steps /
-  guidance / shift / erode (the sampling inputs) invalidates the cache and
+  guidance / shift (the sampling inputs) invalidates the cache and
   requires a full Generate.
 - **Save format** — `ply` or `splat`, applied by **Save to disk**.
 

@@ -13,19 +13,21 @@ from ..core.job import JobConfig, JobResult, TripoSplatJob, num_gaussians_valid
 PLUGIN_NAME = "triposplat_plugin"
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 _PREVIEW_DIR = PLUGIN_ROOT / "cache" / "previews"
+_CLIPBOARD_DIR = PLUGIN_ROOT / "cache" / "clipboard"
 _RML_PATH_SAFE_CHARS = "/:._-~"
 _MIN_SCALE = 0.001  # never let a splat collapse to 0/degenerate scale (unrecoverable basis)
 
 _DIRTY_DL = ("model_downloading", "model_error", "dl_progress_value", "dl_progress_pct",
              "dl_bytes_line", "dl_error_text", "model_status_line", "model_loaded",
-             "confirm_redownload", "can_run")
+             "confirm_redownload", "can_run", "can_gen_clipboard")
 _DIRTY_PREVIEW = ("has_matte",)
 _DIRTY_RUN = ("stage_text", "progress_value", "progress_pct", "progress_status")
-_DIRTY_RUNNING = ("show_idle", "show_running", "can_run")
+_DIRTY_RUNNING = ("show_idle", "show_running", "can_run", "can_gen_clipboard")
 _DIRTY_LOG = ("show_logs", "live_log_text")
 _DIRTY_RESULT = ("show_results", "show_error", "error_text", "result_count",
                  "result_time", "has_node", "has_latent")
-_DIRTY_PLACE = ("tx", "ty", "tz", "rx", "ry", "rz", "scl", "gizmo_mode", "gizmo_active", "edit_target")
+_DIRTY_PLACE = ("tx", "ty", "tz", "rx", "ry", "rz", "scl", "gizmo_mode",
+                "is_translate", "is_rotate", "is_scale", "gizmo_active", "edit_target")
 
 
 def _encode_rml_path(path: Path | str) -> str:
@@ -60,7 +62,7 @@ class TripoSplatPanel(lf.ui.Panel):
         self.guidance_scale = 3.0
         self.shift = 3.0
         self.num_gaussians = 262144
-        self.erode_radius = 1
+        self.erode_radius = 1  # fixed; "Cleanup edges" control removed
         self.append_mode = True
         # placement
         self.tx = self.ty = self.tz = 0.0
@@ -75,6 +77,7 @@ class TripoSplatPanel(lf.ui.Panel):
         self._preview_token = uuid4().hex
         self._preprocess_generation = 0
         self._matte_preview_path: Path | None = None
+        self._clipboard_path: Path | None = None  # last image pasted from the clipboard
         self._matte_preview_decorator = "none"
         self._matte_preview_size = (0, 0)
         self._matte_preview_applied = ""
@@ -85,6 +88,7 @@ class TripoSplatPanel(lf.ui.Panel):
         self._node_name = ""
         self._generated_nodes = []   # every splat this plugin has inserted, for selection-follow
         self._last_selection = None  # last host selection seen (diff cache)
+        self._selection_unsub = None  # selection_generation signal unsubscribe handle
         self._gizmo = None
         self._confirm_redownload = False
         self._collapsed = {"advanced", "precise"}
@@ -96,6 +100,7 @@ class TripoSplatPanel(lf.ui.Panel):
         self._last_log = ""
         self._last_running = False
         self._last_result_key = None
+        self._last_can_paste = None
 
     def _dirty(self, *fields):
         if not self._handle:
@@ -108,14 +113,32 @@ class TripoSplatPanel(lf.ui.Panel):
         self._doc = doc
         self._sync_section_states()
         self._apply_matte_preview(doc)
+        # Follow selection event-driven (not only the on_update poll, which lags under
+        # LFS on-demand rendering) so the gizmo retargets the instant a different
+        # generated splat is selected.
+        if self._selection_unsub is None:
+            try:
+                from lfs_plugins.ui.state import AppState
+                self._selection_unsub = AppState.selection_generation.subscribe_as(
+                    "triposplat_plugin", self._on_selection_generation)
+            except Exception as exc:  # noqa: BLE001
+                lf.log.warn(f"[triposplat] selection-follow subscribe failed: {exc}")
 
     def on_unmount(self, doc):
+        if self._selection_unsub is not None:
+            try:
+                self._selection_unsub()
+            except Exception:
+                pass
+            self._selection_unsub = None
         if self._job and self._job.is_running():
             self._job.cancel()
         self._detach_gizmo()
         self._gizmo = None  # fully release the native gizmo on panel teardown
         _safe_unlink(self._matte_preview_path)
         self._matte_preview_path = None
+        _safe_unlink(self._clipboard_path)
+        self._clipboard_path = None
         try:
             lf.ui.free_plugin_textures(PLUGIN_NAME)  # verify: stub
         except Exception:
@@ -161,6 +184,7 @@ class TripoSplatPanel(lf.ui.Panel):
         # two-way scalar bindings
         model.bind("image_path", lambda: self.image_path, self._set_image_path)
         model.bind_func("image_name", lambda: Path(self.image_path).name if self.image_path else "No image selected")
+        model.bind_func("can_paste", self._can_paste_clipboard)
         model.bind("seed", lambda: str(self.seed), lambda v: self._set_int("seed", v, 0, 2**31 - 1))
         model.bind("steps", lambda: str(self.steps), lambda v: self._set_int("steps", v, 1, 50))
         model.bind("guidance_scale", lambda: f"{self.guidance_scale:.1f}",
@@ -168,9 +192,10 @@ class TripoSplatPanel(lf.ui.Panel):
         model.bind("shift", lambda: f"{self.shift:.1f}", lambda v: self._set_float("shift", v, 1.0, 6.0))
         model.bind("num_gaussians", lambda: str(self.num_gaussians),
                    lambda v: self._set_int("num_gaussians", v, 32768, 262144))
-        model.bind("erode_radius", lambda: str(self.erode_radius), self._set_erode)
         model.bind("append_mode", lambda: self.append_mode, lambda v: self._set_bool("append_mode", v))
-        model.bind("gizmo_mode", lambda: self.gizmo_mode, self._set_gizmo_mode)
+        model.bind_func("is_translate", lambda: self.gizmo_mode == "translate")
+        model.bind_func("is_rotate", lambda: self.gizmo_mode == "rotate")
+        model.bind_func("is_scale", lambda: self.gizmo_mode == "scale")
         for ax in ("tx", "ty", "tz", "rx", "ry", "rz", "scl"):
             model.bind(ax, (lambda a=ax: f"{getattr(self, a):.3f}"),
                        (lambda v, a=ax: self._set_transform_field(a, v)))
@@ -190,6 +215,7 @@ class TripoSplatPanel(lf.ui.Panel):
         model.bind_func("edit_target", lambda: self._node_name or "(none)")
         model.bind_func("gizmo_active", self._gizmo_active)
         model.bind_func("can_run", self._can_run)
+        model.bind_func("can_gen_clipboard", self._can_gen_clipboard)
         model.bind_func("show_idle", lambda: not self._is_running())
         model.bind_func("show_running", self._is_running)
         model.bind_func("stage_text", lambda: self._job.stage.value if self._job else "")
@@ -205,6 +231,7 @@ class TripoSplatPanel(lf.ui.Panel):
         model.bind_func("result_time", lambda: f"{self._last_result.elapsed_s:.1f}s" if self._last_result else "")
         # events
         model.bind_event("browse_image", self._on_browse_image)
+        model.bind_event("paste_image", self._on_paste_image)
         model.bind_event("toggle_section", self._on_toggle_section)
         model.bind_event("retry_download", lambda *_: downloads.start_background_download())
         model.bind_event("unload_model", lambda *_: threading.Thread(target=pipeline_loader.unload, daemon=True).start())
@@ -213,7 +240,9 @@ class TripoSplatPanel(lf.ui.Panel):
         model.bind_event("confirm_redownload_no", self._on_redownload_no)
         model.bind_event("finalize_placement", self._on_finalize_placement)
         model.bind_event("start_placement", self._on_start_placement)
+        model.bind_event("set_gizmo_mode", self._on_set_gizmo_mode)
         model.bind_event("do_start", self._on_start)
+        model.bind_event("generate_from_clipboard", self._on_generate_from_clipboard)
         model.bind_event("do_cancel", self._on_cancel)
         model.bind_event("redecode", self._on_redecode)
         self._handle = model.get_handle()
@@ -306,6 +335,11 @@ class TripoSplatPanel(lf.ui.Panel):
                 dirty = True
         if self._sync_selection():
             dirty = True
+        cp = self._can_paste_clipboard()  # cheap SDL clipboard poll; live-enable Paste
+        if cp != self._last_can_paste:
+            self._last_can_paste = cp
+            self._dirty("can_paste", "can_gen_clipboard")
+            dirty = True
         # LFS renders on demand, so when the app is otherwise idle on_update stops
         # being called and the viewport stops repainting. While a splat is selected
         # (so we may need to follow it) or the gizmo is active (placement in
@@ -330,6 +364,9 @@ class TripoSplatPanel(lf.ui.Panel):
 
     def _can_run(self):
         return bool(self.image_path) and downloads.is_ready() and not self._is_running()
+
+    def _can_gen_clipboard(self):
+        return self._can_paste_clipboard() and downloads.is_ready() and not self._is_running()
 
     def _show_results(self):
         return self._last_result is not None and self._last_result.success
@@ -365,9 +402,44 @@ class TripoSplatPanel(lf.ui.Panel):
             self._dirty("image_path", "image_name")
             self._kick_preprocess()
 
-    def _set_erode(self, v):
-        self._set_int("erode_radius", v, 0, 8)
-        self._kick_preprocess()
+    @staticmethod
+    def _can_paste_clipboard():
+        # Host clipboard-image API (lf.ui.has_clipboard_image) is newer; degrade to a
+        # disabled Paste button on hosts that predate it rather than erroring.
+        try:
+            return bool(lf.ui.has_clipboard_image())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _paste_clipboard_to_image(self) -> bool:
+        # Decode the clipboard image to a unique temp file and make it the current
+        # image. Unique path (not a fixed name) keeps the matte/latent cache keyed on
+        # image_path correct across successive pastes. Returns True on success.
+        path = _CLIPBOARD_DIR / f"clipboard_{uuid4().hex}.png"
+        try:
+            _CLIPBOARD_DIR.mkdir(parents=True, exist_ok=True)
+            ok = lf.ui.save_clipboard_image(str(path))  # host decodes via OIIO -> RGB
+        except Exception as exc:  # noqa: BLE001
+            lf.log.warn(f"[triposplat] clipboard paste failed: {exc}")
+            return False
+        if not ok:
+            lf.log.warn("[triposplat] No image on the clipboard to paste.")
+            return False
+        _safe_unlink(self._clipboard_path)  # drop the previous pasted temp file
+        self._clipboard_path = path
+        self.image_path = str(path)
+        self._dirty("image_path", "image_name")
+        return True
+
+    def _on_paste_image(self, *_):
+        if self._paste_clipboard_to_image():
+            self._kick_preprocess()
+
+    def _on_generate_from_clipboard(self, *_):
+        # Paste + generate in one click. The job re-runs preprocess for the new image
+        # internally, so there's no need to wait for the matte preview first.
+        if self._paste_clipboard_to_image():
+            self._on_start()
 
     def _kick_preprocess(self):
         """Run preprocess on a daemon thread; result feeds the matte preview."""
@@ -521,6 +593,11 @@ class TripoSplatPanel(lf.ui.Panel):
         self._attach_gizmo()
         self._dirty(*_DIRTY_PLACE)
 
+    def _on_selection_generation(self, _gen):
+        # Host selection changed — retarget immediately instead of waiting for the
+        # on_update poll (which can lag a beat under LFS on-demand rendering).
+        self._sync_selection()
+
     def _sync_selection(self):
         """Follow the scene: when one of THIS plugin's generated splats is selected
         in the viewport, retarget the placement gizmo + T/R/S fields to it. Polled
@@ -595,6 +672,13 @@ class TripoSplatPanel(lf.ui.Panel):
                 self._gizmo.operation = self.gizmo_mode
             except Exception:
                 pass
+
+    def _on_set_gizmo_mode(self, handle, event, args):
+        del handle, event
+        mode = args[0] if args else ""
+        if mode in ("translate", "rotate", "scale"):
+            self._set_gizmo_mode(mode)
+            self._dirty("gizmo_mode", "is_translate", "is_rotate", "is_scale")
 
     def _set_transform_field(self, axis, v):
         try:

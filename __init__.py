@@ -89,12 +89,39 @@ def _apply_perf_flags() -> None:
         lf.log.warn(f"[triposplat] couldn't apply perf flags: {exc}")
 
 
+def _preload_models() -> None:
+    """Download weights (if needed) and load the TripoSplat pipeline — which
+    includes the RMBG/BiRefNet matting model — into VRAM at plugin load, so the
+    Step 1 matte preview appears promptly on the first pasted/chosen image
+    instead of waiting for a lazy first-use load. Runs on a daemon thread, and is
+    skipped while training so it never competes with the trainer for VRAM."""
+    try:
+        from lfs_plugins.ui.state import AppState
+        if AppState.is_training.value:
+            lf.log.info("[triposplat] training active — deferring model preload.")
+            return
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if not downloads.is_weights_cached():
+            downloads.start_background_download()
+            while not downloads.is_weights_cached():
+                st = downloads.get_state()
+                if st.get("cancelled") or st["stage"] == "error":
+                    lf.log.warn("[triposplat] model preload aborted: weights unavailable.")
+                    return
+                downloads.join(timeout=1.0)  # wait on the download thread, re-check
+        pipeline_loader.get_pipeline()  # loads diffusion model + RMBG/BiRefNet into VRAM
+        lf.log.info("[triposplat] model + matting preloaded.")
+    except Exception as exc:  # noqa: BLE001
+        lf.log.warn(f"[triposplat] model preload failed: {exc}")
+
+
 def on_load():
     downloads.set_logger(lambda msg: lf.log.info(f"[triposplat] {msg}"))
     _apply_perf_flags()
     for cls in _classes:
         lf.register_class(cls)
-    # Weights download lazily on first use (image selection), not at startup.
     try:
         global _last_training_state
         from lfs_plugins.ui.state import AppState
@@ -102,6 +129,10 @@ def on_load():
         AppState.is_training.subscribe_as("triposplat_plugin", _on_training_state_changed)
     except Exception as exc:  # noqa: BLE001
         lf.log.warn(f"triposplat_plugin: couldn't subscribe to is_training ({exc}).")
+    # Preload weights + model (incl. RMBG/BiRefNet matting) on plugin load so the
+    # first image's matte preview is ready immediately, not lazily on first use.
+    import threading
+    threading.Thread(target=_preload_models, name="triposplat-preload", daemon=True).start()
     lf.log.info("triposplat_plugin loaded")
 
 
