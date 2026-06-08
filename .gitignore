@@ -8,3 +8,4 @@ __pycache__/
 # Root-anchored: only top-level downloaded weights + JIT caches are ignored.
 /models/
 /cache/
+.gstack/
