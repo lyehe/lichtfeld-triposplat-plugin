@@ -445,6 +445,12 @@ def preprocess_image(image, rmbg: BiRefNet, erode_radius: int = 1) -> Image.Imag
         image.putalpha(image.getchannel(3).filter(ImageFilter.MinFilter(2 * erode_radius + 1)))
     alpha = np.array(image.getchannel(3))
     ys, xs = np.nonzero(alpha)
+    if xs.size == 0:
+        # RMBG found no foreground (featureless/background-only input): fall
+        # back to the full frame instead of crashing on an empty reduction.
+        h, w = alpha.shape
+        xs = np.array([0, w - 1])
+        ys = np.array([0, h - 1])
     bbox = [xs.min(), ys.min(), xs.max(), ys.max()]
     cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
     half = max(bbox[2] - bbox[0], bbox[3] - bbox[1]) / 2 * 1.2
