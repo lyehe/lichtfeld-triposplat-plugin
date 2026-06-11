@@ -22,6 +22,34 @@ _GAUSSIANS_PER_POINT = 32
 _INSERT_TIMEOUT_S = 120.0
 
 
+_sdpa_ctx_factory = None
+
+
+def _fast_sdpa_ctx():
+    """Context manager selecting the fastest validated SDPA backend for sampling.
+
+    Windows torch wheels ship NO FlashAttention kernels, so SDPA falls back to
+    the memory-efficient backend (an sm80 cutlass kernel) — ~49% of every flow
+    pass. The cuDNN backend measured 1.17x end-to-end on the 20-step sampler at
+    latent cos 0.99922 vs mem-efficient (numerically equivalent; see
+    triposplat-cpp/bench/RESULTS.md). Probe once; fall back to the default
+    backend silently wherever cuDNN SDPA is unavailable."""
+    global _sdpa_ctx_factory
+    if _sdpa_ctx_factory is None:
+        import contextlib
+        try:
+            import torch
+            import torch.nn.functional as F
+            from torch.nn.attention import SDPBackend, sdpa_kernel
+            q = torch.randn(1, 1, 8, 64, device="cuda", dtype=torch.float16)
+            with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
+                F.scaled_dot_product_attention(q, q, q)
+            _sdpa_ctx_factory = lambda: sdpa_kernel(SDPBackend.CUDNN_ATTENTION)  # noqa: E731
+        except Exception:  # noqa: BLE001 - any failure -> default backend
+            _sdpa_ctx_factory = contextlib.nullcontext
+    return _sdpa_ctx_factory()
+
+
 def num_gaussians_valid(n: int) -> int:
     n = max(_NUM_GAUSSIANS_MIN, min(_NUM_GAUSSIANS_MAX, int(n)))
     if n % _GAUSSIANS_PER_POINT != 0:
@@ -250,10 +278,11 @@ class TripoSplatJob:
                 frac = 0.30 + 0.45 * (step / max(1, total))
                 self._set(JobStage.SAMPLE, frac, f"Sampling {step}/{total}...")
 
-            out = pipe.sample_latent(
-                cond, steps=cfg.steps, guidance_scale=cfg.guidance_scale,
-                shift=cfg.shift, generator=gen, callback=_cb,
-            )
+            with _fast_sdpa_ctx():
+                out = pipe.sample_latent(
+                    cond, steps=cfg.steps, guidance_scale=cfg.guidance_scale,
+                    shift=cfg.shift, generator=gen, callback=_cb,
+                )
             self._latent = out["latent"]
             self._signature = latent_signature(cfg, self._preprocessed_id)
         else:
