@@ -44,6 +44,7 @@ def _noop_log(_msg: str) -> None:
 
 
 _log_fn: Callable[[str], None] = _noop_log
+_notify_fn: Callable[[], None] = lambda: None  # noqa: E731
 
 
 def get_state() -> dict:
@@ -54,6 +55,13 @@ def get_state() -> dict:
 def _set(**kw) -> None:
     with _lock:
         _state.update(kw)
+    _notify_fn()
+
+
+def set_notifier(fn: Callable[[], None]) -> None:
+    """Called (from the download thread) after every state change, e.g. to wake the UI."""
+    global _notify_fn
+    _notify_fn = fn
 
 
 def _is_cancelled() -> bool:

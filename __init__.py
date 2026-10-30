@@ -21,6 +21,12 @@ _HF_HUB = _HF_HOME / "hub"
 os.environ["HF_HOME"] = str(_HF_HOME)
 os.environ["HF_HUB_CACHE"] = str(_HF_HUB)
 os.environ["HUGGINGFACE_HUB_CACHE"] = str(_HF_HUB)
+# Windows without Developer Mode can't symlink; the copy fallback is fine for single-revision repos.
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+# hf_xet downloads hang inside LFS's embedded Python (worker threads never leave
+# new_file_download_group). Plain HTTPS works, and its partial files land inside
+# CKPTS_DIR, which is what core/downloads.py measures for progress.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 # Plugin-local torch.compile / Triton caches.
 _COMPILE_CACHE = _PLUGIN_DIR / "cache" / "torch_compile"
@@ -49,6 +55,7 @@ except ModuleNotFoundError:  # pragma: no cover - test/DX path outside LFS host
         PanelHeightMode=SimpleNamespace(CONTENT="CONTENT"),
         free_plugin_textures=lambda _plugin_name: None,
         schedule_on_ui_thread=lambda fn: fn(),
+        request_redraw=lambda: None,
     )
     lf.log = SimpleNamespace(
         info=lambda _msg: None,
@@ -61,7 +68,7 @@ except ModuleNotFoundError:  # pragma: no cover - test/DX path outside LFS host
     sys.modules["lichtfeld"] = lf
 
 from .core import downloads, pipeline_loader  # noqa: E402
-from .panels.main_panel import TripoSplatPanel  # noqa: E402
+from .panels.main_panel import PLUGIN_NAME, TripoSplatPanel  # noqa: E402
 
 _classes = [TripoSplatPanel]
 _last_training_state = False
@@ -119,6 +126,8 @@ def _preload_models() -> None:
 
 def on_load():
     downloads.set_logger(lambda msg: lf.log.info(f"[triposplat] {msg}"))
+    # LFS renders on demand; wake the frame loop so the panel sees download progress.
+    downloads.set_notifier(lf.ui.request_redraw)
     _apply_perf_flags()
     for cls in _classes:
         lf.register_class(cls)
@@ -126,7 +135,7 @@ def on_load():
         global _last_training_state
         from lfs_plugins.ui.state import AppState
         _last_training_state = bool(AppState.is_training.value)
-        AppState.is_training.subscribe_as("triposplat_plugin", _on_training_state_changed)
+        AppState.is_training.subscribe_as(PLUGIN_NAME, _on_training_state_changed)
     except Exception as exc:  # noqa: BLE001
         lf.log.warn(f"triposplat_plugin: couldn't subscribe to is_training ({exc}).")
     # Preload weights + model (incl. RMBG/BiRefNet matting) on plugin load so the

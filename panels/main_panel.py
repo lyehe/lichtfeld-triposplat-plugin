@@ -10,7 +10,7 @@ import lichtfeld as lf
 from ..core import downloads, pipeline_loader, preprocess
 from ..core.job import JobConfig, JobResult, TripoSplatJob, num_gaussians_valid
 
-PLUGIN_NAME = "triposplat_plugin"
+PLUGIN_NAME = "TripoSplat"  # must match [project].name: LFS frees subscriptions/textures by it on unload
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 _PREVIEW_DIR = PLUGIN_ROOT / "cache" / "previews"
 _CLIPBOARD_DIR = PLUGIN_ROOT / "cache" / "clipboard"
@@ -50,6 +50,10 @@ class TripoSplatPanel(lf.ui.Panel):
     order = 226
     template = str(Path(__file__).resolve().with_name("main_panel.rml"))
     height_mode = lf.ui.PanelHeightMode.CONTENT
+    # on_update polls worker-thread state (download, job) and the clipboard, so this
+    # panel is interval-driven. LFS renders on demand: the workers call
+    # lf.ui.request_redraw() on every change so an idle app still runs the poll.
+    update_policy = "interval"
     update_interval_ms = 150
 
     def __init__(self):
@@ -120,7 +124,7 @@ class TripoSplatPanel(lf.ui.Panel):
             try:
                 from lfs_plugins.ui.state import AppState
                 self._selection_unsub = AppState.selection_generation.subscribe_as(
-                    "triposplat_plugin", self._on_selection_generation)
+                    PLUGIN_NAME, self._on_selection_generation)
             except Exception as exc:  # noqa: BLE001
                 lf.log.warn(f"[triposplat] selection-follow subscribe failed: {exc}")
 

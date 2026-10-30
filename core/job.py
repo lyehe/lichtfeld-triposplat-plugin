@@ -184,6 +184,9 @@ class TripoSplatJob:
     def _set(self, stage, progress, status):
         with self._lock:
             self._stage, self._progress, self._status = stage, progress, status
+        # LFS renders on demand; wake the frame loop so the panel polls this change.
+        if lf is not None:
+            lf.ui.request_redraw()
 
     def _log_line(self, msg):
         line = str(msg).rstrip()
